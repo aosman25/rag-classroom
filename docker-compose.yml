@@ -1,0 +1,129 @@
+# =============================================================================
+# RAG Classroom
+# =============================================================================
+# A self-contained stack for teaching how Retrieval-Augmented Generation grounds
+# LLM answers and reduces hallucinations. Students hand-chunk text, the admin
+# loads it into the vector DB, and students compare answers with RAG on/off.
+#
+# Usage:
+#   1. cp .env.example .env   # fill in your API keys
+#   2. docker compose up --build
+#   3. Open http://localhost:8080
+#
+# Services exposed to host:
+#   - classroom-web (8080) -- the UI students and admin use
+#   - milvus       (19530) -- optional, for direct Milvus inspection
+# Everything else lives on the internal Docker network.
+# =============================================================================
+
+services:
+  # --- Vector database (Milvus standalone + its dependencies) ---------------
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    container_name: classroom-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+    command: >
+      etcd -advertise-client-urls=http://127.0.0.1:2379
+           -listen-client-urls=http://0.0.0.0:2379
+           --data-dir /etcd
+    volumes:
+      - etcd_data:/etcd
+    networks:
+      - classroom-net
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: classroom-minio
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: minio server /data
+    volumes:
+      - minio_data:/data
+    networks:
+      - classroom-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    image: milvusdb/milvus:v2.6.9
+    container_name: classroom-milvus
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+    depends_on:
+      - etcd
+      - minio
+    networks:
+      - classroom-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+
+  # --- Backend (FastAPI BFF: auth, ingest, retrieval, Gemini, embeddings) ---
+  classroom-api:
+    build:
+      context: ./classroom-api
+    container_name: classroom-api
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - DEEPINFRA_API_KEY=${DEEPINFRA_API_KEY}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-m3-multi}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+      - JWT_SECRET=${JWT_SECRET:-dev-secret-change-me}
+      - MILVUS_URI=http://milvus:19530
+      - MILVUS_COLLECTION=classroom_chunks
+      - DENSE_DIM=1024
+      - ALLOWED_ORIGINS=*
+    depends_on:
+      milvus:
+        condition: service_healthy
+    networks:
+      - classroom-net
+    restart: unless-stopped
+
+  # --- Frontend (nginx serving the Vite build, /api proxied to classroom-api)
+  classroom-web:
+    build:
+      context: ./classroom-web
+    container_name: classroom-web
+    ports:
+      - "8080:80"
+    depends_on:
+      - classroom-api
+    networks:
+      - classroom-net
+    restart: unless-stopped
+
+volumes:
+  etcd_data:
+  minio_data:
+  milvus_data:
+
+networks:
+  classroom-net:
+    driver: bridge
