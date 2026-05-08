@@ -95,7 +95,7 @@ export default function StudentView() {
               <input
                 type="number"
                 min={1}
-                max={20}
+                max={10}
                 value={topK}
                 onChange={(e) => setTopK(Number(e.target.value))}
                 className="input w-20"

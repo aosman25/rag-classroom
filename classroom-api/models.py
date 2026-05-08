@@ -43,7 +43,7 @@ class RetrievedSource(BaseModel):
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=4000)
     use_rag: bool = True
-    top_k: int = Field(default=4, ge=1, le=20)
+    top_k: int = Field(default=4, ge=1, le=10)
     temperature: float = Field(default=0.3, ge=0.0, le=1.5)
 
 
