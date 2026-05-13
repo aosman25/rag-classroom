@@ -1,10 +1,76 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   StoredChunk,
   getAdminToken,
   setAdminToken,
 } from "../api";
+
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  let i = 0;
+  const src = text.replace(/^﻿/, "");
+  while (i < src.length) {
+    const ch = src[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') {
+          field += '"';
+          i += 2;
+          continue;
+        }
+        inQuotes = false;
+        i++;
+        continue;
+      }
+      field += ch;
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      i++;
+      continue;
+    }
+    if (ch === ",") {
+      row.push(field);
+      field = "";
+      i++;
+      continue;
+    }
+    if (ch === "\r") {
+      i++;
+      continue;
+    }
+    if (ch === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+      i++;
+      continue;
+    }
+    field += ch;
+    i++;
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function extractChunksFromCsv(text: string): string[] {
+  const rows = parseCsv(text);
+  if (rows.length === 0) return [];
+  const dataRows = rows.slice(1);
+  return dataRows
+    .map((r) => (r[1] ?? "").trim())
+    .filter((c) => c.length > 0);
+}
 
 export default function AdminView() {
   const [authed, setAuthed] = useState<boolean>(!!getAdminToken());
@@ -81,6 +147,9 @@ function AdminPanel({ onLogout }: { onLogout: () => void }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [csvChunks, setCsvChunks] = useState<string[] | null>(null);
+  const [csvFileName, setCsvFileName] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const previewCount = splitChunks(draft).length;
 
@@ -130,6 +199,51 @@ function AdminPanel({ onLogout }: { onLogout: () => void }) {
     }
   }
 
+  async function handleCsvFile(file: File) {
+    setError(null);
+    setMessage(null);
+    try {
+      const text = await file.text();
+      const extracted = extractChunksFromCsv(text);
+      setCsvChunks(extracted);
+      setCsvFileName(file.name);
+      if (extracted.length === 0) {
+        setError("No non-empty chunks found in the second column of the CSV.");
+      }
+    } catch (e: any) {
+      setError(`Could not read CSV: ${String(e.message || e)}`);
+      setCsvChunks(null);
+      setCsvFileName(null);
+    }
+  }
+
+  function clearCsv() {
+    setCsvChunks(null);
+    setCsvFileName(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  async function ingestCsv() {
+    if (!csvChunks || csvChunks.length === 0) return;
+    setError(null);
+    setMessage(null);
+    setBusy(true);
+    try {
+      const r = await api.addChunks(csvChunks);
+      setMessage(
+        `Ingested ${r.inserted} chunk${r.inserted === 1 ? "" : "s"} from ${
+          csvFileName ?? "CSV"
+        }.`
+      );
+      clearCsv();
+      await refresh();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function resetAll() {
     if (!confirm("Delete ALL chunks from the database? This cannot be undone.")) {
       return;
@@ -155,10 +269,76 @@ function AdminPanel({ onLogout }: { onLogout: () => void }) {
       <div className="space-y-4">
         <section className="card p-5 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold">Add chunks</h2>
+            <h2 className="text-base font-semibold">Upload chunks from CSV</h2>
             <button onClick={onLogout} className="btn-secondary text-xs">
               Log out
             </button>
+          </div>
+          <p className="text-xs text-slate-500">
+            Upload a CSV where each row is one chunk and the{" "}
+            <strong>second column</strong> contains the chunk text. The first
+            row is treated as a header. Empty cells are skipped.
+          </p>
+
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleCsvFile(f);
+              }}
+              className="block text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-50 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-indigo-700 hover:file:bg-indigo-100"
+            />
+            {csvFileName && (
+              <button
+                onClick={clearCsv}
+                className="btn-secondary text-xs"
+                disabled={busy}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+
+          {csvChunks && csvChunks.length > 0 && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-slate-500">
+                  Preview: {csvChunks.length} chunk
+                  {csvChunks.length === 1 ? "" : "s"} from{" "}
+                  <span className="font-mono">{csvFileName}</span>
+                </span>
+                <button
+                  onClick={ingestCsv}
+                  disabled={busy}
+                  className="btn-primary"
+                >
+                  {busy ? "Ingesting…" : `Ingest ${csvChunks.length} chunk${
+                    csvChunks.length === 1 ? "" : "s"
+                  }`}
+                </button>
+              </div>
+              <ol className="max-h-64 overflow-auto rounded-md border border-slate-200 divide-y divide-slate-200 text-xs">
+                {csvChunks.map((c, idx) => (
+                  <li key={idx} className="p-2 flex gap-2">
+                    <span className="font-mono text-slate-400 shrink-0">
+                      {idx + 1}.
+                    </span>
+                    <span className="whitespace-pre-wrap text-slate-700">
+                      {c}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+        </section>
+
+        <section className="card p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold">Add chunks</h2>
           </div>
           <p className="text-xs text-slate-500">
             Paste your chunks below. Separate each chunk with a{" "}
